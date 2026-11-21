@@ -1,4 +1,4 @@
-name: Build Android APK
+name: Build SafeCloner Pro
 
 on:
   push:
@@ -20,7 +20,7 @@ jobs:
         with:
           gradle-version: '8.5'
 
-      - name: Generate App Files and Build APK
+      - name: Generate Custom Master App and Build APK
         run: |
           mkdir -p app/src/main/res/xml
           mkdir -p app/src/main/java/com/example/safecloner
@@ -40,7 +40,7 @@ jobs:
                   mavenCentral()
               }
           }
-          rootProject.name = "SafeCloner"
+          rootProject.name = "SafeClonerPro"
           include ':app'
           EOF
 
@@ -72,8 +72,8 @@ jobs:
                   applicationId "com.example.safecloner"
                   minSdk 24
                   targetSdk 34
-                  versionCode 1
-                  versionName "1.0"
+                  versionCode 4
+                  versionName "4.0-Pro"
               }
 
               buildTypes {
@@ -102,11 +102,16 @@ jobs:
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
               <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+              <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+              <uses-permission android:name="android.permission.WAKE_LOCK" />
 
               <application
                   android:allowBackup="true"
                   android:fullBackupContent="true"
-                  android:label="SafeCloner"
+                  android:label="SafeCloner Pro"
                   android:theme="@style/Theme.MaterialComponents.DayNight.DarkActionBar">
 
                   <activity
@@ -117,6 +122,11 @@ jobs:
                           <category android:name="android.intent.category.LAUNCHER" />
                       </intent-filter>
                   </activity>
+
+                  <service
+                      android:name=".KeepAliveService"
+                      android:exported="false"
+                      android:foregroundServiceType="dataSync" />
 
                   <receiver
                       android:name=".MyDeviceAdminReceiver"
@@ -147,27 +157,83 @@ jobs:
           cat << 'EOF' > app/src/main/java/com/example/safecloner/MainActivity.kt
           package com.example.safecloner
 
+          import android.Manifest
+          import android.app.ActivityManager
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.app.Service
           import android.app.admin.DeviceAdminReceiver
           import android.app.admin.DevicePolicyManager
           import android.content.ComponentName
           import android.content.Context
           import android.content.Intent
+          import android.content.pm.PackageManager
+          import android.graphics.Color
+          import android.graphics.Typeface
+          import android.net.Uri
+          import android.os.Build
           import android.os.Bundle
+          import android.os.IBinder
+          import android.os.PowerManager
+          import android.provider.Settings
           import android.widget.Button
           import android.widget.LinearLayout
+          import android.widget.ScrollView
           import android.widget.TextView
           import android.widget.Toast
           import androidx.appcompat.app.AppCompatActivity
+          import androidx.core.app.ActivityCompat
+          import androidx.core.app.NotificationCompat
+          import androidx.core.content.ContextCompat
+          import java.io.File
+
+          class KeepAliveService : Service() {
+              private var wakeLock: PowerManager.WakeLock? = null
+
+              override fun onCreate() {
+                  super.onCreate()
+                  val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+                  wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "SafeClonerPro::BackgroundLock")
+                  wakeLock?.acquire()
+
+                  val channelId = "safecloner_pro_bg"
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                      val channel = NotificationChannel(
+                          channelId,
+                          "SafeCloner Pro Background Engine",
+                          NotificationManager.IMPORTANCE_LOW
+                      )
+                      getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+                  }
+
+                  val notification = NotificationCompat.Builder(this, channelId)
+                      .setContentTitle("SafeCloner Pro Engine Active (Ad-Free)")
+                      .setContentText("Background WakeLock ON — Sabhi clones active hain")
+                      .setSmallIcon(android.R.drawable.ic_popup_sync)
+                      .setOngoing(true)
+                      .build()
+
+                  startForeground(3001, notification)
+              }
+
+              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+                  return START_STICKY
+              }
+
+              override fun onDestroy() {
+                  wakeLock?.let { if (it.isHeld) it.release() }
+                  super.onDestroy()
+              }
+
+              override fun onBind(intent: Intent?): IBinder? = null
+          }
 
           class MyDeviceAdminReceiver : DeviceAdminReceiver() {
               override fun onProfileProvisioningComplete(context: Context, intent: Intent) {
                   val dpm = context.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
                   val adminComponent = ComponentName(context, MyDeviceAdminReceiver::class.java)
-
                   dpm.setProfileName(adminComponent, "SafeClone Space")
                   dpm.setProfileEnabled(adminComponent)
-
-                  Toast.makeText(context, "Clone Space Ready! Kuchh delete nahi hoga.", Toast.LENGTH_LONG).show()
               }
           }
 
@@ -182,56 +248,190 @@ jobs:
                   dpm = getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
                   adminComponent = ComponentName(this, MyDeviceAdminReceiver::class.java)
 
-                  val layout = LinearLayout(this).apply {
+                  startBackgroundEngine()
+
+                  val scrollView = ScrollView(this)
+                  val root = LinearLayout(this).apply {
                       orientation = LinearLayout.VERTICAL
-                      setPadding(48, 64, 48, 48)
+                      setPadding(36, 40, 36, 48)
                   }
 
-                  val statusText = TextView(this).apply {
+                  val header = TextView(this).apply {
+                      text = "SafeCloner Pro (100% Ad-Free)"
+                      textSize = 21f
+                      setTypeface(null, Typeface.BOLD)
+                      setTextColor(Color.parseColor("#1565C0"))
+                      setPadding(0, 0, 0, 8)
+                  }
+                  root.addView(header)
+
+                  val ramInfo = getRamStatusText()
+                  val statusCard = TextView(this).apply {
+                      text = "$ramInfo\nBackground Engine: ACTIVE (WakeLock ON)"
+                      textSize = 14f
+                      setBackgroundColor(Color.parseColor("#E3F2FD"))
+                      setTextColor(Color.parseColor("#0D47A1"))
+                      setPadding(24, 20, 24, 20)
+                  }
+                  root.addView(statusCard)
+
+                  val toolsHeader = TextView(this).apply {
+                      text = "\n1. Setup & Background Protection"
                       textSize = 16f
-                      text = if (dpm.isProfileOwnerApp(packageName)) {
-                          "Status: Aap Clone Space ke andar hain. Yahan ke sabhi apps aur data 100% isolated aur safe hain."
-                      } else {
-                          "Status: Main Phone. Sabhi apps ka clone banane ke liye neeche button dabayein."
-                      }
+                      setTypeface(null, Typeface.BOLD)
+                      setTextColor(Color.parseColor("#2E7D32"))
+                      setPadding(0, 12, 0, 8)
                   }
+                  root.addView(toolsHeader)
 
-                  val btnCreateCloneSpace = Button(this).apply {
-                      text = "1. Create Clone Space (All Apps)"
-                      setOnClickListener { startWorkProfileProvisioning() }
+                  val btnExtract = Button(this).apply {
+                      text = "Extract MyJio Base APK (For 10 Clones)"
+                      setOnClickListener { extractBaseApk("com.jio.myjio", "MyJio_Base.apk") }
                   }
+                  root.addView(btnExtract)
 
-                  val btnAntiUninstall = Button(this).apply {
-                      text = "2. Enable Anti-Uninstall Lock"
+                  val btnBattery = Button(this).apply {
+                      text = "Allow Unlimited Background Run (No Battery Kill)"
+                      setOnClickListener { requestNoBatteryRestriction() }
+                  }
+                  root.addView(btnBattery)
+
+                  val btnAntiDelete = Button(this).apply {
+                      text = "Enable Anti-Uninstall Lock (Data Safe)"
                       setOnClickListener { enableAntiUninstall() }
                   }
+                  root.addView(btnAntiDelete)
 
-                  val btnEnableApps = Button(this).apply {
-                      text = "3. Enable Play Store in Clone Space"
-                      setOnClickListener {
-                          if (dpm.isProfileOwnerApp(packageName)) {
-                              enableSystemAppsInClone()
+                  val jioHeader = TextView(this).apply {
+                      text = "\n2. MyJio 10 Accounts Hub"
+                      textSize = 16f
+                      setTypeface(null, Typeface.BOLD)
+                      setTextColor(Color.parseColor("#D84315"))
+                      setPadding(0, 12, 0, 8)
+                  }
+                  root.addView(jioHeader)
+
+                  for (i in 1..10) {
+                      val clonePkg = "com.jio.myjio.c$i"
+                      val isInstalled = isPackageInstalled(clonePkg)
+                      val btn = Button(this).apply {
+                          text = if (isInstalled) {
+                              "MyJio Account #$i  [READY - OPEN]"
                           } else {
-                              Toast.makeText(this@MainActivity, "Pehle Clone Space banayein aur uske andar se ye app kholein", Toast.LENGTH_SHORT).show()
+                              "MyJio Account #$i  [Install MyJio_$i.apk]"
+                          }
+                          setOnClickListener {
+                              if (isPackageInstalled(clonePkg)) {
+                                  launchPkg(clonePkg)
+                              } else {
+                                  Toast.makeText(
+                                      this@MainActivity,
+                                      "GitHub Actions se bani MyJio_$i.apk install karein",
+                                      Toast.LENGTH_LONG
+                                  ).show()
+                              }
                           }
                       }
+                      root.addView(btn)
                   }
 
-                  layout.addView(statusText)
-                  layout.addView(btnCreateCloneSpace)
-                  layout.addView(btnAntiUninstall)
-                  layout.addView(btnEnableApps)
-                  setContentView(layout)
+                  val otherHeader = TextView(this).apply {
+                      text = "\n3. Other Cloned Apps"
+                      textSize = 16f
+                      setTypeface(null, Typeface.BOLD)
+                      setTextColor(Color.parseColor("#4527A0"))
+                      setPadding(0, 12, 0, 8)
+                  }
+                  root.addView(otherHeader)
+
+                  val otherApps = listOf(
+                      Pair("Airtel Thanks", "com.myairtelapp"),
+                      Pair("Instagram", "com.instagram.android"),
+                      Pair("Facebook", "com.facebook.katana"),
+                      Pair("Swiggy", "in.swiggy.android")
+                  )
+
+                  otherApps.forEach { (name, basePkg) ->
+                      val clonePkg = "$basePkg.c1"
+                      val btn = Button(this).apply {
+                          text = "$name  [OPEN]"
+                          setOnClickListener {
+                              when {
+                                  isPackageInstalled(clonePkg) -> launchPkg(clonePkg)
+                                  isPackageInstalled(basePkg) -> launchPkg(basePkg)
+                                  else -> Toast.makeText(this@MainActivity, "$name install nahi hai", Toast.LENGTH_SHORT).show()
+                              }
+                          }
+                      }
+                      root.addView(btn)
+                  }
+
+                  scrollView.addView(root)
+                  setContentView(scrollView)
               }
 
-              private fun startWorkProfileProvisioning() {
-                  val intent = Intent(DevicePolicyManager.ACTION_PROVISION_MANAGED_PROFILE).apply {
-                      putExtra(DevicePolicyManager.EXTRA_PROVISIONING_DEVICE_ADMIN_COMPONENT_NAME, adminComponent)
+              private fun getRamStatusText(): String {
+                  val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+                  val memInfo = ActivityManager.MemoryInfo()
+                  am.getMemoryInfo(memInfo)
+                  val freeMb = memInfo.availMem / (1024 * 1024)
+                  val totalMb = memInfo.totalMem / (1024 * 1024)
+                  return "Device RAM: ${freeMb} MB Free / ${totalMb} MB Total"
+              }
+
+              private fun isPackageInstalled(pkg: String): Boolean {
+                  return try {
+                      packageManager.getPackageInfo(pkg, 0)
+                      true
+                  } catch (_: Exception) {
+                      false
                   }
-                  if (intent.resolveActivity(packageManager) != null) {
-                      startActivityForResult(intent, 101)
+              }
+
+              private fun launchPkg(pkg: String) {
+                  val intent = packageManager.getLaunchIntentForPackage(pkg)
+                  if (intent != null) {
+                      startActivity(intent)
+                  }
+              }
+
+              private fun extractBaseApk(pkg: String, outName: String) {
+                  try {
+                      val appInfo = packageManager.getApplicationInfo(pkg, 0)
+                      val srcFile = File(appInfo.sourceDir)
+                      val destDir = File(getExternalFilesDir(null), "Extracted_APKs")
+                      if (!destDir.exists()) destDir.mkdirs()
+                      val destFile = File(destDir, outName)
+                      srcFile.copyTo(destFile, overwrite = true)
+                      Toast.makeText(this, "Saved: Android/data/com.example.safecloner/files/Extracted_APKs/$outName", Toast.LENGTH_LONG).show()
+                  } catch (e: Exception) {
+                      Toast.makeText(this, "Pehle Play Store se original MyJio install karein", Toast.LENGTH_LONG).show()
+                  }
+              }
+
+              private fun startBackgroundEngine() {
+                  if (Build.VERSION.SDK_INT >= 33) {
+                      if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                          ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.POST_NOTIFICATIONS), 202)
+                      }
+                  }
+                  val serviceIntent = Intent(this, KeepAliveService::class.java)
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                      startForegroundService(serviceIntent)
                   } else {
-                      Toast.makeText(this, "Aapke phone mein Work Profile support disabled hai", Toast.LENGTH_LONG).show()
+                      startService(serviceIntent)
+                  }
+              }
+
+              private fun requestNoBatteryRestriction() {
+                  val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+                  if (!pm.isIgnoringBatteryOptimizations(packageName)) {
+                      val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                          data = Uri.parse("package:$packageName")
+                      }
+                      startActivity(intent)
+                  } else {
+                      Toast.makeText(this, "Background run pehle se unrestricted hai!", Toast.LENGTH_SHORT).show()
                   }
               }
 
@@ -239,22 +439,12 @@ jobs:
                   if (!dpm.isAdminActive(adminComponent)) {
                       val intent = Intent(DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN).apply {
                           putExtra(DevicePolicyManager.EXTRA_DEVICE_ADMIN, adminComponent)
-                          putExtra(DevicePolicyManager.EXTRA_ADD_EXPLANATION, "Isse aapka cloner app aur data galti se delete nahi hoga.")
+                          putExtra(DevicePolicyManager.EXTRA_ADD_EXPLANATION, "Isse aapka SafeCloner Pro app aur data delete nahi hoga.")
                       }
                       startActivity(intent)
                   } else {
                       Toast.makeText(this, "Anti-Uninstall pehle se ON hai!", Toast.LENGTH_SHORT).show()
                   }
-              }
-
-              private fun enableSystemAppsInClone() {
-                  val packagesToEnable = listOf("com.android.vending", "com.android.chrome")
-                  packagesToEnable.forEach { pkg ->
-                      try {
-                          dpm.enableSystemApp(adminComponent, pkg)
-                      } catch (_: Exception) { }
-                  }
-                  Toast.makeText(this, "Clone Space mein Play Store aur Chrome activate ho gaye!", Toast.LENGTH_LONG).show()
               }
           }
           EOF
@@ -263,6 +453,6 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: SafeCloner-APK
+          name: SafeCloner-Pro-APK
           path: app/build/outputs/apk/debug/app-debug.apk
           
