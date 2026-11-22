@@ -1,0 +1,90 @@
+name: Build 10 MyJio Clones
+
+on:
+  push:
+    paths:
+      - '.github/workflows/clone10.yml'
+  workflow_dispatch:
+
+jobs:
+  build-10-clones:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Download MyJio Base APK from Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download v1.0 -p "*.apk" || gh release download -p "*.apk"
+          APK_FILE=$(ls *.apk | head -n 1)
+          if [ "$APK_FILE" != "MyJio_Base.apk" ]; then
+            mv "$APK_FILE" MyJio_Base.apk
+          fi
+
+      - name: Install Apktool and Create Keystore
+        run: |
+          wget -q https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar -O apktool.jar
+          keytool -genkey -v -keystore myjio_permanent.keystore -alias clonekey -keyalg RSA -keysize 2048 -validity 10000 -storepass 123456 -keypass 123456 -dname "CN=SafeCloner, OU=Dev, O=SafeCloner, L=IN, S=BR, C=IN"
+
+      - name: Decode and Optimize Base APK
+        run: |
+          java -Xmx4g -jar apktool.jar d -f MyJio_Base.apk -o base_decoded
+          rm -rf base_decoded/lib/x86 base_decoded/lib/x86_64
+
+      - name: Generate 10 Separate MyJio APKs
+        run: |
+          mkdir -p output_apks
+          BUILD_TOOLS=$(find $ANDROID_HOME/build-tools -maxdepth 1 | sort -V | tail -n 1)
+
+          cat << 'EOF' > patch_manifest.py
+          import re, sys
+
+          idx = sys.argv[1]
+          manifest_path = sys.argv[2]
+
+          with open(manifest_path, "r", encoding="utf-8") as f:
+              xml = f.read()
+
+          old_pkg = "com.jio.myjio"
+          new_pkg = f"com.jio.myjio.c{idx}"
+
+          xml = re.sub(r'android:name="\.([^"]+)"', rf'android:name="{old_pkg}.\1"', xml)
+          xml = xml.replace(f'package="{old_pkg}"', f'package="{new_pkg}"', 1)
+
+          def rename_auth(m):
+              auths = m.group(1).split(";")
+              return f'android:authorities="{";".join([f"{a}.c{idx}" for a in auths])}"'
+          xml = re.sub(r'android:authorities="([^"]+)"', rename_auth, xml)
+
+          custom_perms = re.findall(r'<permission[^>]*android:name="([^"]+)"', xml)
+          for perm in set(custom_perms):
+              xml = xml.replace(f'"{perm}"', f'"{perm}.c{idx}"')
+
+          xml = re.sub(r'android:label="[^"]*"', f'android:label="MyJio {idx}"', xml, count=1)
+
+          with open(manifest_path, "w", encoding="utf-8") as f:
+              f.write(xml)
+          EOF
+
+          for i in $(seq 1 10); do
+            echo "Building MyJio $i..."
+            cp -r base_decoded clone_$i
+            python3 patch_manifest.py $i clone_$i/AndroidManifest.xml
+            java -Xmx4g -jar apktool.jar b clone_$i -o unsigned_$i.apk
+            $BUILD_TOOLS/zipalign -p -f 4 unsigned_$i.apk aligned_$i.apk
+            $BUILD_TOOLS/apksigner sign --ks myjio_permanent.keystore --ks-pass pass:123456 --key-pass pass:123456 --out output_apks/MyJio_$i.apk aligned_$i.apk
+            rm -rf clone_$i unsigned_$i.apk aligned_$i.apk
+          done
+
+      - name: Upload All 10 MyJio APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: MyJio-10-Clones-APKs
+          path: output_apks/*.apk
+          
